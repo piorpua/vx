@@ -3,12 +3,12 @@
 # k3d is a lightweight wrapper to run k3s (Rancher Lab's minimal Kubernetes
 # distribution) in Docker.
 #
-# Release assets (GitHub releases):
-#   - Linux/macOS: k3d-{os}-{arch}.tar.gz  (contains single binary)
-#   - Windows:     k3d-windows-amd64.exe   (direct executable)
-#
-# OS:   linux, darwin, windows
-# Arch: amd64, arm64 (Linux/macOS), amd64 (Windows)
+# Release assets (GitHub releases) — all are standalone binaries, no archives:
+#   k3d-linux-amd64
+#   k3d-linux-arm64
+#   k3d-darwin-amd64
+#   k3d-darwin-arm64
+#   k3d-windows-amd64.exe
 #
 # Version source: k3d-io/k3d releases on GitHub (tag prefix "v")
 
@@ -68,9 +68,11 @@ def _k3d_platform(ctx):
     return _PLATFORMS.get(key)
 
 # ---------------------------------------------------------------------------
-# download_url - GitHub releases
-# Linux/macOS: https://github.com/k3d-io/k3d/releases/download/v{version}/k3d-{os}-{arch}.tar.gz
-# Windows:     https://github.com/k3d-io/k3d/releases/download/v{version}/k3d-windows-amd64.exe
+# download_url
+#
+# All assets are standalone binaries (no archive):
+#   k3d-{os}-{arch}       (Linux/macOS)
+#   k3d-{os}-{arch}.exe   (Windows)
 # ---------------------------------------------------------------------------
 
 def download_url(ctx, version):
@@ -78,45 +80,42 @@ def download_url(ctx, version):
     if not platform:
         return None
     os_str, arch_str = platform
-    if ctx.platform.os == "windows":
-        return "https://github.com/k3d-io/k3d/releases/download/v{}/k3d-{}-{}.exe".format(
-            version, os_str, arch_str)
-    return "https://github.com/k3d-io/k3d/releases/download/v{}/k3d-{}-{}.tar.gz".format(
-        version, os_str, arch_str)
+    ext = ".exe" if ctx.platform.os == "windows" else ""
+    return "https://github.com/k3d-io/k3d/releases/download/v{}/k3d-{}-{}{}".format(
+        version, os_str, arch_str, ext)
 
 # ---------------------------------------------------------------------------
-# install_layout
-# Windows: direct .exe binary
-# Linux/macOS: tar.gz containing 'k3d' binary at root
+# install_layout — single binary for all platforms
 # ---------------------------------------------------------------------------
 
 def install_layout(ctx, _version):
-    if ctx.platform.os == "windows":
-        return {
-            "__type":           "binary",
-            "executable_paths": ["k3d.exe"],
-        }
+    platform = _k3d_platform(ctx)
+    if not platform:
+        return None
+    os_str, arch_str = platform
+    ext = ".exe" if ctx.platform.os == "windows" else ""
+    source_name = "k3d-{}-{}{}".format(os_str, arch_str, ext)
+    target_name = "k3d" + ext
     return {
-        "__type":           "archive",
-        "executable_paths": ["k3d"],
+        "type":        "binary",
+        "source_name": source_name,
+        "target_name": target_name,
+        "target_dir":  "bin",
     }
 
 # ---------------------------------------------------------------------------
 # Path queries + environment
 # ---------------------------------------------------------------------------
 
-paths            = path_fns("k3d")
+paths            = path_fns("k3d", executable = "bin/k3d")
 store_root       = paths["store_root"]
 get_execute_path = paths["get_execute_path"]
-
 
 def environment(ctx, _version):
     return [env_prepend("PATH", ctx.install_dir + "/bin")]
 
-
 def post_install(_ctx, _version):
     return None
-
 
 def deps(_ctx, _version):
     return []
