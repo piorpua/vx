@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.26](https://github.com/loonghao/vx/compare/v0.8.25...v0.8.26) (2026-04-11)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate hashbrown-986da7b5efc2b80e to 0.17 - abandoned ([d934ad1](https://github.com/loonghao/vx/commit/d934ad179813669f0c343585019676eb32a82913))
+
 ## [0.8.25](https://github.com/loonghao/vx/compare/v0.8.24...v0.8.25) (2026-04-10)
 
 
