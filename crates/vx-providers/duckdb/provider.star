@@ -5,8 +5,12 @@
 #
 # Asset naming: duckdb_cli-{os}-{arch}.{ext}
 #   - Linux:   duckdb_cli-linux-amd64.zip, duckdb_cli-linux-arm64.zip
-#   - macOS:   duckdb_cli-osx-universal.gz  (universal binary)
+#   - macOS:   duckdb_cli-osx-amd64.zip, duckdb_cli-osx-arm64.zip
+#              (also universal: duckdb_cli-osx-universal.zip)
 #   - Windows: duckdb_cli-windows-amd64.zip, duckdb_cli-windows-arm64.zip
+#
+# NOTE: macOS also ships a .gz single-binary, but we use .zip for
+#       consistent archive extraction across all platforms.
 
 load("@vx//stdlib:provider.star",
      "runtime_def", "github_permissions", "path_fns")
@@ -53,7 +57,10 @@ fetch_versions = make_fetch_versions("duckdb", "duckdb")
 def _duckdb_asset(ctx):
     """Return the asset filename for the DuckDB CLI on the current platform."""
     if ctx.platform.os == "macos":
-        return "duckdb_cli-osx-universal.gz"
+        # Use arch-specific zip assets (available since v1.1.x)
+        arch_map = {"x64": "amd64", "arm64": "arm64"}
+        arch_str = arch_map.get(ctx.platform.arch, "amd64")
+        return "duckdb_cli-osx-{}.zip".format(arch_str)
     elif ctx.platform.os == "linux":
         arch_map = {"x64": "amd64", "arm64": "arm64"}
         arch_str = arch_map.get(ctx.platform.arch, "amd64")
