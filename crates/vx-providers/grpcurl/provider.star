@@ -37,6 +37,10 @@ runtimes = [
     runtime_def("grpcurl",
         version_cmd     = "{executable} version",
         version_pattern = "grpcurl v\\d+\\.\\d+\\.\\d+",
+        test_commands = [
+            {"command": "{executable} version", "name": "version_check",
+             "expected_output": "grpcurl v\\d+"},
+        ],
     ),
 ]
 
