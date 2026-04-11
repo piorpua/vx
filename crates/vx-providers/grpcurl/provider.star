@@ -15,8 +15,7 @@
 # Version source: fullstorydev/grpcurl releases on GitHub (tag prefix "v")
 
 load("@vx//stdlib:provider.star",
-     "runtime_def", "github_permissions", "path_fns",
-     "archive_layout")
+     "runtime_def", "github_permissions", "path_fns")
 load("@vx//stdlib:github.star", "make_fetch_versions", "github_asset_url")
 load("@vx//stdlib:env.star",    "env_prepend")
 
