@@ -6,6 +6,7 @@
 //! providers.  The three `*_owned` variants are used internally by
 //! [`super::builder`] when building multi-runtime providers.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use super::StarlarkProvider;
@@ -404,6 +405,87 @@ pub fn make_version_info_fn_owned(
                 download_version: sr.download_version,
                 install_params: sr.install_params,
             }))
+        })
+    })
+}
+
+/// Create a `PostExtractFn` closure backed by an embedded `provider.star`.
+///
+/// The returned function calls `post_extract(ctx, version, install_dir)` in the
+/// Starlark script and returns the raw action descriptors as JSON values.
+/// `ManifestDrivenRuntime::post_install` iterates over those descriptors and
+/// executes each one (SetPermissions / RunCommand).
+///
+/// This is the type alias used in `vx-runtime` for the post_extract function pointer.
+/// It must exactly match `vx_runtime::PostExtractFn`.
+type PostExtractFn = Arc<
+    dyn Fn(
+            String, // version
+            String, // install_dir
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = anyhow::Result<Vec<serde_json::Value>>>
+                    + Send,
+            >,
+        > + Send
+        + Sync,
+>;
+
+pub(super) fn make_post_extract_fn_owned(
+    provider_name: Arc<str>,
+    content: Arc<str>,
+    _runtime_name: String,
+) -> PostExtractFn {
+    Arc::new(move |version: String, install_dir: String| {
+        let provider_name = Arc::clone(&provider_name);
+        let content = Arc::clone(&content);
+        Box::pin(async move {
+            let provider = StarlarkProvider::from_content(&*provider_name, &*content)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to load {} provider.star: {e}", provider_name)
+                })?;
+
+            let install_path = Path::new(&install_dir);
+            let actions = provider.post_extract(&version, install_path).await?;
+
+            // Convert PostExtractAction → serde_json::Value so vx-runtime does not
+            // need to import vx-starlark types (that would create a dependency cycle).
+            let json_actions = actions
+                .into_iter()
+                .map(|a| match a {
+                    crate::provider::types::PostExtractAction::SetPermissions { path, mode } => {
+                        serde_json::json!({
+                            "type": "set_permissions",
+                            "path": path,
+                            "mode": mode,
+                        })
+                    }
+                    crate::provider::types::PostExtractAction::RunCommand {
+                        executable,
+                        args,
+                        env,
+                        on_failure,
+                        ..
+                    } => {
+                        serde_json::json!({
+                            "type": "run_command",
+                            "command": executable,
+                            "args": args,
+                            "env": env,
+                            "on_failure": on_failure,
+                        })
+                    }
+                    crate::provider::types::PostExtractAction::CreateShim { .. }
+                    | crate::provider::types::PostExtractAction::FlattenDir { .. } => {
+                        // Shims and flatten-dir are not yet handled in the manifest-driven post_install path.
+                        serde_json::json!({"type": "skip"})
+                    }
+                })
+                .filter(|v| v.get("type").and_then(|t| t.as_str()) != Some("skip"))
+                .collect();
+
+            Ok(json_actions)
         })
     })
 }

@@ -153,6 +153,24 @@ pub type VersionInfoFn = Arc<
         + Sync,
 >;
 
+/// Type alias for the `post_extract(version, install_dir)` function injected from
+/// Starlark providers.
+///
+/// Called after a successful download/extract, receives the install directory
+/// path as a string. Returns a list of serialized post-extract action descriptors.
+/// An empty `Vec` means "no actions".
+pub type PostExtractFn = Arc<
+    dyn Fn(
+            String,  // version
+            String,  // install_dir as string
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<Vec<serde_json::Value>>> + Send,
+            >,
+        > + Send
+        + Sync,
+>;
+
 /// A runtime driven by manifest configuration (`provider.star`).
 ///
 /// For Starlark-driven providers, the `fetch_versions_fn`, `download_url_fn`, and
@@ -183,6 +201,12 @@ pub struct ManifestDrivenRuntime {
     pub deps_fn: Option<DepsFn>,
     /// Optional Starlark-driven `version_info(user_version)` implementation (RFC 0040).
     pub version_info_fn: Option<VersionInfoFn>,
+    /// Optional Starlark-driven `post_extract(version, install_dir)` hook.
+    ///
+    /// Called after the binary/archive has been placed in `install_dir`.
+    /// Used by providers like Rust that need to run an installer binary
+    /// (e.g. `rustup-init`) after extraction before the tool is usable.
+    pub post_extract_fn: Option<PostExtractFn>,
     /// Optional pip package name for Python-based tools.
     pub pip_package: Option<String>,
 
@@ -246,6 +270,7 @@ impl ManifestDrivenRuntime {
             install_layout_fn: None,
             deps_fn: None,
             version_info_fn: None,
+            post_extract_fn: None,
             pip_package: None,
 
             shells: Vec::new(),
@@ -277,6 +302,17 @@ impl ManifestDrivenRuntime {
     /// Set the `version_info` function (RFC 0040).
     pub fn with_version_info(mut self, f: VersionInfoFn) -> Self {
         self.version_info_fn = Some(f);
+        self
+    }
+
+    /// Set the Starlark-driven `post_extract(version, install_dir)` hook.
+    ///
+    /// The hook is called after the provider binary/archive has been placed in
+    /// `install_dir`.  Use this for providers (like Rust) that ship a downloader
+    /// binary (`rustup-init`) rather than the final tool, and therefore need an
+    /// extra run step before `cargo`/`rustc` become available.
+    pub fn with_post_extract(mut self, f: PostExtractFn) -> Self {
+        self.post_extract_fn = Some(f);
         self
     }
 
@@ -727,7 +763,10 @@ impl Runtime for ManifestDrivenRuntime {
                     }
 
                     for path in &candidates {
-                        if path.exists() {
+                        // Only accept files (not directories).  The install directory can contain
+                        // subdirectories with the same name as the executable (e.g. rust stores
+                        // cargo as a directory `cargo/` alongside the actual `cargo/bin/cargo.exe`).
+                        if path.is_file() {
                             let resolved = prefer_windows_executable(path.clone());
                             debug!(
                                 "Found bundled executable {} at {} (parent version: {})",
@@ -879,14 +918,31 @@ impl Runtime for ManifestDrivenRuntime {
             }
         }
 
-        // 2. Fall back to PATH lookup (system-installed tools, e.g. installed by brew/choco).
-        if which::which(&self.executable).is_ok() {
-            return Ok(true);
-        }
-
-        // 3. Fall back to system_paths glob search (for tools like MSVC cl.exe not on PATH).
+        // 2. Fall back to system_paths glob search (for tools like MSVC cl.exe not on PATH).
+        //    This is the primary mechanism by which providers declare "this tool lives at
+        //    a known system path" — it is an explicit opt-in in provider.star.
         if !self.system_paths.is_empty() {
             return Ok(find_first_glob_match(&self.system_paths).is_some());
+        }
+
+        // 3. Fall back to PATH lookup only for tools that vx cannot install itself.
+        //    A tool "cannot be installed by vx" when:
+        //    - it has no download_url (download_url_fn returns None) AND
+        //    - it has system install strategies (brew/apt/choco) rather than a direct download.
+        //
+        //    For tools that vx CAN install (like rust, node, go), skipping this step ensures
+        //    that a system-installed version never masks a missing vx-managed installation,
+        //    preventing the "is_installed=true but find_executable=None → reinstall loop" bug.
+        //
+        //    The heuristic: if the provider has install_strategies (system package manager),
+        //    it's a system-managed tool and we should check system PATH.
+        //    If it has a direct download path (download_url_fn), vx manages it exclusively.
+        let is_vx_managed = self.download_url_fn.is_some()
+            || self.install_layout_fn.is_some()
+            || self.pip_package.is_some();
+
+        if !is_vx_managed && which::which(&self.executable).is_ok() {
+            return Ok(true);
         }
 
         Ok(false)
@@ -988,6 +1044,139 @@ impl Runtime for ManifestDrivenRuntime {
 
     async fn install(&self, version: &str, ctx: &RuntimeContext) -> Result<InstallResult> {
         self.install_impl(version, ctx).await
+    }
+
+    /// Run the Starlark `post_extract` hook after a successful installation.
+    ///
+    /// The hook is wired up from `provider.star::post_extract(ctx, version, install_dir)`.
+    /// For providers like Rust, this runs `rustup-init -y ...` so that `cargo`/`rustc`
+    /// are fully installed into the vx store directory before the tool is used.
+    async fn post_install(&self, version: &str, ctx: &RuntimeContext) -> Result<()> {
+        let Some(ref post_extract_fn) = self.post_extract_fn else {
+            return Ok(());
+        };
+
+        let platform = crate::platform::Platform::current();
+        let store_name = self.bundled_with.as_deref().unwrap_or(&self.name);
+        // install_dir = ~/.vx/store/<store_name>/<version>/<platform>
+        let install_dir = ctx
+            .paths
+            .version_store_dir(store_name, version)
+            .join(platform.as_str());
+
+        tracing::debug!(
+            "post_install: running post_extract hook for {}@{} in {}",
+            self.name,
+            version,
+            install_dir.display()
+        );
+
+        let actions = post_extract_fn(version.to_string(), install_dir.to_string_lossy().to_string()).await?;
+
+        if actions.is_empty() {
+            return Ok(());
+        }
+
+        // Execute each post-extract action.
+        // We re-use the same JSON format that the Starlark engine produces so we
+        // don't need to import vx-starlark types here (that would create a cycle).
+        for action in &actions {
+            let action_type = action
+                .get("type")
+                .and_then(|t| t.as_str())
+                .unwrap_or("unknown");
+
+            match action_type {
+                "set_permissions" => {
+                    // Only meaningful on Unix; skip on Windows.
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        if let Some(path_str) = action.get("path").and_then(|p| p.as_str()) {
+                            let full = install_dir.join(path_str);
+                            if let Some(mode_str) = action.get("mode").and_then(|m| m.as_str()) {
+                                let mode = u32::from_str_radix(mode_str, 8).unwrap_or(0o755);
+                                if let Err(e) =
+                                    std::fs::set_permissions(&full, std::fs::Permissions::from_mode(mode))
+                                {
+                                    tracing::warn!("post_install: set_permissions failed for {}: {}", full.display(), e);
+                                }
+                            }
+                        }
+                    }
+                }
+                "run_command" => {
+                    if let Some(cmd_str) = action.get("command").and_then(|c| c.as_str()) {
+                        let args: Vec<String> = action
+                            .get("args")
+                            .and_then(|a| a.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+
+                        let env_map: std::collections::HashMap<String, String> = action
+                            .get("env")
+                            .and_then(|e| e.as_object())
+                            .map(|obj| {
+                                obj.iter()
+                                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+
+                        let on_failure = action
+                            .get("on_failure")
+                            .and_then(|f| f.as_str())
+                            .unwrap_or("ignore");
+
+                        tracing::debug!(
+                            "post_install: run_command {} {:?} (on_failure={})",
+                            cmd_str, args, on_failure
+                        );
+
+                        let mut cmd = std::process::Command::new(cmd_str);
+                        cmd.args(&args);
+                        for (k, v) in &env_map {
+                            cmd.env(k, v);
+                        }
+
+                        match cmd.status() {
+                            Ok(status) if status.success() => {}
+                            Ok(status) => {
+                                let msg = format!(
+                                    "post_install: command '{}' exited with {}",
+                                    cmd_str, status
+                                );
+                                if on_failure == "error" {
+                                    return Err(anyhow::anyhow!("{}", msg));
+                                } else {
+                                    tracing::warn!("{}", msg);
+                                }
+                            }
+                            Err(e) => {
+                                let msg = format!(
+                                    "post_install: failed to run '{}': {}",
+                                    cmd_str, e
+                                );
+                                if on_failure == "error" {
+                                    return Err(anyhow::anyhow!("{}", msg));
+                                } else {
+                                    tracing::warn!("{}", msg);
+                                }
+                            }
+                        }
+                    }
+                }
+                other => {
+                    tracing::debug!("post_install: unknown action type '{}', skipping", other);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn normalize_config(&self) -> Option<&NormalizeConfig> {
