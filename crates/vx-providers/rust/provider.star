@@ -192,14 +192,12 @@ def store_root(ctx):
 
 def get_execute_path(ctx, _version):
     # ctx.runtime_name is the requested runtime (e.g. "cargo", "rustc", "rustfmt", "rust").
-    # Files are installed under ctx.platform_install_dir (= install_dir/<platform>).
-    # rustup-init places cargo/rustc/rustfmt under cargo/bin/ inside that directory.
+    # ctx.install_dir already includes the <platform> sub-directory
+    # (e.g. ~/.vx/store/rust/1.29.0/windows-x64) where cargo/bin/ lives.
     runtime = ctx.runtime_name or "rust"
     exe_suffix = ".exe" if ctx.platform.os == "windows" else ""
 
-    # Use platform_install_dir which includes the <platform> sub-directory
-    # (e.g. ~/.vx/store/rust/1.29.0/windows-x64) where cargo/bin/ lives.
-    base = ctx.platform_install_dir
+    base = ctx.install_dir
 
     if runtime in ("rustc", "cargo", "rustfmt"):
         exe = runtime + exe_suffix
@@ -212,9 +210,9 @@ def post_install(_ctx, _version):
     return None
 
 def environment(ctx, _version):
-    # Use platform_install_dir (= install_dir/<platform>) where rustup-init
-    # placed the cargo/rustup directories.
-    base = ctx.platform_install_dir
+    # ctx.install_dir already includes the <platform> sub-directory
+    # where rustup-init placed the cargo/rustup directories.
+    base = ctx.install_dir
     return [
         env_set("RUSTUP_HOME", base + "/rustup"),
         env_set("CARGO_HOME",  base + "/cargo"),
