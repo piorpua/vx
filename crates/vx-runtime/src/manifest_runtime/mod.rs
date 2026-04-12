@@ -750,7 +750,8 @@ impl Runtime for ManifestDrivenRuntime {
             for parent_version in &candidate_versions {
                 let version_dir = paths.version_store_dir(store_name, parent_version);
                 let platform_dir = version_dir.join(platform.as_str());
-                let search_dirs = [&platform_dir, &version_dir];
+                // New layout: version_dir first, then platform_dir fallback for old installs
+                let search_dirs = [&version_dir, &platform_dir];
 
                 for dir in &search_dirs {
                     // Build candidates from all possible executable names × locations
@@ -1001,7 +1002,13 @@ impl Runtime for ManifestDrivenRuntime {
     ) -> Result<Option<std::path::PathBuf>> {
         let platform = Platform::current();
         let base_path = ctx.paths.version_store_dir(self.store_name(), version);
-        let install_path = base_path.join(platform.as_str());
+        // New layout: install directly to version dir; fallback to platform dir for old installs.
+        let platform_dir = base_path.join(platform.as_str());
+        let install_path = if base_path.exists() {
+            base_path
+        } else {
+            platform_dir
+        };
         if !ctx.fs.exists(&install_path) {
             return Ok(None);
         }
@@ -1058,11 +1065,17 @@ impl Runtime for ManifestDrivenRuntime {
 
         let platform = crate::platform::Platform::current();
         let store_name = self.bundled_with.as_deref().unwrap_or(&self.name);
-        // install_dir = ~/.vx/store/<store_name>/<version>/<platform>
-        let install_dir = ctx
+        // New layout: install_dir = ~/.vx/store/<store_name>/<version>/
+        // (no platform subdirectory). Fall back to platform dir for old installs.
+        let version_dir = ctx
             .paths
-            .version_store_dir(store_name, version)
-            .join(platform.as_str());
+            .version_store_dir(store_name, version);
+        let platform_dir = version_dir.join(platform.as_str());
+        let install_dir = if version_dir.exists() {
+            version_dir
+        } else {
+            platform_dir
+        };
 
         tracing::debug!(
             "post_install: running post_extract hook for {}@{} in {}",
